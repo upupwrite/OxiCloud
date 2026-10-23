@@ -17,34 +17,36 @@ use crate::application::dtos::contact_dto::{
 };
 use crate::application::dtos::drive_dto::{DriveDto, DriveKindDto};
 use crate::application::dtos::favorites_dto::{
-    BatchFavoritesResult, BatchFavoritesStats, FavoriteItemDto, FavoritesResourceItemDto,
+    BatchFavoritesResult, BatchFavoritesStats, FavoriteItemDto, FavoritesOrderBy,
+    FavoritesResourceItemDto,
 };
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::{
     AccessSourceDriveDto, AccessSourceDto, AccessSourceKind, AccessSourceSubjectDto,
     AccessSourceSubjectKind, CreateFolderDto, FolderAncestorDto, FolderAncestorsDto, FolderDto,
-    FolderResourceItemDto, MoveFolderDto, RenameFolderDto,
+    FolderOrderBy, FolderResourceItemDto, MoveFolderDto, RenameFolderDto,
 };
 use crate::application::dtos::folder_listing_dto::FolderListingDto;
 use crate::application::dtos::grant_dto::{
-    CreateGrantDto, GrantDto, OutgoingResourceItemDto, PermissionDto, ResourceContentDto,
-    ResourceDto, ResourceTypeDto, RoleDto, SharedWithMeDto, SharedWithMeItemDto, SubjectDto,
-    SubjectTypeDto, UpdateGrantRoleDto,
+    CreateGrantDto, GrantDto, IncomingGrantOrderBy, OutgoingGrantOrderBy, OutgoingResourceItemDto,
+    PermissionDto, ResourceContentDto, ResourceDto, ResourceTypeDto, RoleDto, SharedWithMeDto,
+    SharedWithMeItemDto, SubjectDto, SubjectTypeDto, UpdateGrantRoleDto,
 };
 use crate::application::dtos::i18n_dto::{
     LocaleDto, TranslationErrorDto, TranslationRequestDto, TranslationResponseDto,
 };
 use crate::application::dtos::pagination::{PaginationDto, PaginationRequestDto};
-use crate::application::dtos::photos_dto::{PhotoKind, PhotoOrderBy};
-use crate::application::dtos::recent_dto::{RecentItemDto, RecentResourceItemDto};
+use crate::application::dtos::photos_dto::{PhotoKind, PhotoOrderBy, PhotoResourceItemDto};
+use crate::application::dtos::recent_dto::{RecentItemDto, RecentOrderBy, RecentResourceItemDto};
 use crate::application::dtos::search_dto::{
-    SearchCriteriaDto, SearchFileResultDto, SearchFolderResultDto, SearchMeta, SearchResourceItem,
-    SearchResourcesDto, SearchResultsDto, SearchSuggestionItem, SearchSuggestionsDto,
+    SearchCriteriaDto, SearchFileResultDto, SearchFolderResultDto, SearchMeta, SearchOrderBy,
+    SearchResourceItem, SearchResourcesDto, SearchResultsDto, SearchSuggestionItem,
+    SearchSuggestionsDto, SearchTypeFilter,
 };
 use crate::application::dtos::share_dto::{CreateShareDto, ShareDto, UpdateShareDto};
 use crate::application::dtos::trash_dto::{
-    DeletePermanentlyRequest, MoveToTrashRequest, RestoreFromTrashRequest, TrashResourceItemDto,
-    TrashResourcesDto, TrashedItemDto,
+    DeletePermanentlyRequest, MoveToTrashRequest, RestoreFromTrashRequest, TrashOrderBy,
+    TrashResourceItemDto, TrashResourcesDto, TrashedItemDto,
 };
 use crate::application::dtos::user_dto::{
     AuthResponseDto, ChangePasswordDto, LoginDto, OidcExchangeDto, OidcProviderInfoDto,
@@ -376,6 +378,7 @@ use crate::interfaces::middleware::server_status::{HeaderPayload, ProgressHeader
         schemas(
             // Folder schemas
             FolderDto,
+            FolderOrderBy,
             CreateFolderDto,
             RenameFolderDto,
             MoveFolderDto,
@@ -482,6 +485,7 @@ use crate::interfaces::middleware::server_status::{HeaderPayload, ProgressHeader
             UpdateShareDto,
             // Trash schemas
             TrashedItemDto,
+            TrashOrderBy,
             TrashResourceItemDto,
             TrashResourcesDto,
             MoveToTrashRequest,
@@ -497,6 +501,8 @@ use crate::interfaces::middleware::server_status::{HeaderPayload, ProgressHeader
             SearchResourceItem,
             SearchMeta,
             SearchCriteriaDto,
+            SearchOrderBy,
+            SearchTypeFilter,
             SearchResultsDto,
             SearchFileResultDto,
             SearchFolderResultDto,
@@ -504,11 +510,13 @@ use crate::interfaces::middleware::server_status::{HeaderPayload, ProgressHeader
             SearchSuggestionItem,
             // Favorites schemas
             FavoriteItemDto,
+            FavoritesOrderBy,
             FavoritesResourceItemDto,
             BatchFavoritesResult,
             BatchFavoritesStats,
             // Recent schemas
             RecentItemDto,
+            RecentOrderBy,
             RecentResourceItemDto,
             // i18n schemas
             LocaleDto,
@@ -534,6 +542,18 @@ use crate::interfaces::middleware::server_status::{HeaderPayload, ProgressHeader
             // missing their TS types.
             PhotoKind,
             PhotoOrderBy,
+            // The response item itself. `PhotosResourcesDto` is a generic
+            // alias (`CursorListResponse<PhotoResourceItemDto>`) and aliases
+            // are not registered here — the item type is, exactly as
+            // `FolderResourceItemDto` is for its own listing.
+            //
+            // Omitting it had a real cost: `/api/photos/resources` declares
+            // `body = PhotosResourcesDto`, so the path appeared in the spec
+            // while its item schema did not, the generated SDK carried no TS
+            // type for it, and the frontend kept a HAND-WRITTEN `PhotoItem`
+            // with no drift guard. That is how `captured_at` stayed typed
+            // `number` long after the server began sending RFC 3339.
+            PhotoResourceItemDto,
             // Contacts / address-book schemas
             AddressBookResponse,
             CreateAddressBookRequest,
@@ -557,6 +577,8 @@ use crate::interfaces::middleware::server_status::{HeaderPayload, ProgressHeader
             CreateGrantDto,
             UpdateGrantRoleDto,
             GrantDto,
+            IncomingGrantOrderBy,
+            OutgoingGrantOrderBy,
             SharedWithMeDto,
             SharedWithMeItemDto,
             OutgoingResourceItemDto,

@@ -5,7 +5,7 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::application::dtos::favorites_dto::{
-    FavoriteItemDto, FavoriteResourceRow, FavoritesCursor,
+    FavoriteItemDto, FavoriteResourceRow, FavoritesCursor, FavoritesOrderBy,
 };
 use crate::application::ports::favorites_ports::FavoritesRepositoryPort;
 use crate::common::errors::{DomainError, ErrorKind, Result};
@@ -39,7 +39,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                 f.size                                          AS "item_size",
                 f.mime_type                                     AS "item_mime_type",
                 COALESCE(f.folder_id, fld.parent_id)            AS "parent_id",
-                COALESCE(f.updated_at, fld.updated_at)          AS "modified_at",
+                COALESCE(f.content_modified_at, fld.content_modified_at) AS "content_modified_at",
                 CASE
                     WHEN uf.item_type = 'folder' THEN fld.path
                     WHEN uf.item_type = 'file'   THEN COALESCE(pfld.path || '/' || f.name, f.name)
@@ -98,13 +98,10 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                         .ok()
                         .flatten()
                         .map(|u| u.to_string()),
-                    modified_at: row.try_get("modified_at").ok(),
+                    modified_at: row.try_get("content_modified_at").ok(),
                     item_path: row.try_get("item_path").ok(),
                     // Temporary defaults; with_display_fields() computes the real values
-                    icon_class: String::new(),
-                    icon_special_class: String::new(),
                     category: String::new(),
-                    size_formatted: String::new(),
                 }
                 .with_display_fields())
             })
@@ -353,7 +350,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         user_id: Uuid,
         limit: usize,
         cursor: Option<&FavoritesCursor>,
-        order_by: &str,
+        order_by: FavoritesOrderBy,
         kinds: Option<&[ResourceKind]>,
         reverse: bool,
     ) -> Result<Vec<FavoriteResourceRow>> {
@@ -373,7 +370,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         NULL::text                       AS mime_type,
         -1::bigint                       AS size,
         fld.created_at                   AS resource_created_at,
-        fld.updated_at                   AS modified_at,
+        fld.content_modified_at,
         fld.drive_id                     AS drive_id,
         NULL::text                       AS blob_hash,
         fld.created_by                   AS created_by,
@@ -414,7 +411,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         f.mime_type,
         f.size::bigint,
         f.created_at                     AS resource_created_at,
-        f.updated_at                     AS modified_at,
+        f.content_modified_at,
         f.drive_id                       AS drive_id,
         f.blob_hash,
         f.created_by                     AS created_by,
@@ -472,7 +469,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
         //        $5=cur_id, $6=limit (for "owner" sort: JOIN uses no extra binds)
         let (keyset, order_by_clause, need_user_join) = match (order_by, reverse) {
             // ── name ────────────────────────────────────────────────────────
-            ("name", false) => (
+            (FavoritesOrderBy::Name, false) => (
                 "WHERE ($3::bigint IS NULL)
                     OR (folder_first::bigint > $3)
                     OR (folder_first::bigint = $3 AND sort_str > $2)
@@ -480,7 +477,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                 "ORDER BY folder_first ASC, sort_str ASC, resource_id ASC",
                 false,
             ),
-            ("name", true) => (
+            (FavoritesOrderBy::Name, true) => (
                 "WHERE ($3::bigint IS NULL)
                     OR (folder_first::bigint > $3)
                     OR (folder_first::bigint = $3 AND sort_str < $2)
@@ -489,7 +486,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                 false,
             ),
             // ── type ────────────────────────────────────────────────────────
-            ("type", false) => (
+            (FavoritesOrderBy::Type, false) => (
                 "WHERE ($3::bigint IS NULL)
                     OR (type_order > $3)
                     OR (type_order = $3 AND sort_str > $2)
@@ -497,7 +494,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                 "ORDER BY type_order ASC, sort_str ASC, resource_id ASC",
                 false,
             ),
-            ("type", true) => (
+            (FavoritesOrderBy::Type, true) => (
                 "WHERE ($3::bigint IS NULL)
                     OR (type_order < $3)
                     OR (type_order = $3 AND sort_str < $2)
@@ -506,14 +503,14 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                 false,
             ),
             // ── favorited_at ─────────────────────────────────────────────────
-            ("favorited_at", false) => (
+            (FavoritesOrderBy::FavoritedAt, false) => (
                 "WHERE ($4::timestamptz IS NULL)
                     OR (favorited_at < $4)
                     OR (favorited_at = $4 AND resource_id < $5::uuid)",
                 "ORDER BY favorited_at DESC, resource_id DESC",
                 false,
             ),
-            ("favorited_at", true) => (
+            (FavoritesOrderBy::FavoritedAt, true) => (
                 "WHERE ($4::timestamptz IS NULL)
                     OR (favorited_at > $4)
                     OR (favorited_at = $4 AND resource_id > $5::uuid)",
@@ -521,29 +518,29 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                 false,
             ),
             // ── modified_at ──────────────────────────────────────────────────
-            ("modified_at", false) => (
+            (FavoritesOrderBy::ModifiedAt, false) => (
                 "WHERE ($4::timestamptz IS NULL)
-                    OR (modified_at < $4)
-                    OR (modified_at = $4 AND resource_id < $5::uuid)",
-                "ORDER BY modified_at DESC, resource_id DESC",
+                    OR (content_modified_at < $4)
+                    OR (content_modified_at = $4 AND resource_id < $5::uuid)",
+                "ORDER BY content_modified_at DESC, resource_id DESC",
                 false,
             ),
-            ("modified_at", true) => (
+            (FavoritesOrderBy::ModifiedAt, true) => (
                 "WHERE ($4::timestamptz IS NULL)
-                    OR (modified_at > $4)
-                    OR (modified_at = $4 AND resource_id > $5::uuid)",
-                "ORDER BY modified_at ASC, resource_id ASC",
+                    OR (content_modified_at > $4)
+                    OR (content_modified_at = $4 AND resource_id > $5::uuid)",
+                "ORDER BY content_modified_at ASC, resource_id ASC",
                 false,
             ),
             // ── size ─────────────────────────────────────────────────────────
-            ("size", false) => (
+            (FavoritesOrderBy::Size, false) => (
                 "WHERE ($3::bigint IS NULL)
                     OR (size > $3)
                     OR (size = $3 AND resource_id > $5::uuid)",
                 "ORDER BY size ASC, resource_id ASC",
                 false,
             ),
-            ("size", true) => (
+            (FavoritesOrderBy::Size, true) => (
                 "WHERE ($3::bigint IS NULL)
                     OR (size < $3)
                     OR (size = $3 AND resource_id < $5::uuid)",
@@ -551,7 +548,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                 false,
             ),
             // ── owner ────────────────────────────────────────────────────────
-            ("owner", false) => (
+            (FavoritesOrderBy::Owner, false) => (
                 "WHERE ($2::text IS NULL)
                     OR (LOWER(u.username) > $2)
                     OR (LOWER(u.username) = $2 AND favorited_at < $4)
@@ -559,7 +556,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                 "ORDER BY LOWER(u.username) ASC, favorited_at DESC, resource_id DESC",
                 true,
             ),
-            ("owner", true) => (
+            (FavoritesOrderBy::Owner, true) => (
                 "WHERE ($2::text IS NULL)
                     OR (LOWER(u.username) < $2)
                     OR (LOWER(u.username) = $2 AND favorited_at > $4)
@@ -567,23 +564,10 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
                 "ORDER BY LOWER(u.username) DESC, favorited_at ASC, resource_id ASC",
                 true,
             ),
-            // ── default: same as name, ascending ─────────────────────────────
-            (_, false) => (
-                "WHERE ($3::bigint IS NULL)
-                    OR (folder_first::bigint > $3)
-                    OR (folder_first::bigint = $3 AND sort_str > $2)
-                    OR (folder_first::bigint = $3 AND sort_str = $2 AND resource_id > $5::uuid)",
-                "ORDER BY folder_first ASC, sort_str ASC, resource_id ASC",
-                false,
-            ),
-            (_, true) => (
-                "WHERE ($3::bigint IS NULL)
-                    OR (folder_first::bigint > $3)
-                    OR (folder_first::bigint = $3 AND sort_str < $2)
-                    OR (folder_first::bigint = $3 AND sort_str = $2 AND resource_id < $5::uuid)",
-                "ORDER BY folder_first ASC, sort_str DESC, resource_id DESC",
-                false,
-            ),
+            // §7: no catch-all arm — all six `FavoritesOrderBy` variants
+            // are named above, so this match is exhaustive and a new axis
+            // is a compile error here rather than silently ordering by
+            // name while the caller's cursor carries a different axis.
         };
 
         let user_join = if need_user_join {
@@ -604,7 +588,7 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
             "{cte}
 SELECT
     r.resource_type, r.resource_id, r.name, r.parent_id,
-    r.mime_type, r.size, r.resource_created_at, r.modified_at,
+    r.mime_type, r.size, r.resource_created_at, r.content_modified_at,
     r.drive_id, r.blob_hash, r.created_by, r.updated_by,
     r.is_favorite, r.is_shared,
     r.is_owner, r.favorited_at, r.resource_path,
@@ -645,20 +629,20 @@ LIMIT $6"
 
                 // Pre-compute the cursor sort fields based on order_by
                 let (c_sort_str, c_sort_int, c_sort_ts) = match order_by {
-                    "name" => (sort_str_val, Some(folder_first as i64), None),
-                    "type" => (sort_str_val, Some(type_order), None),
-                    "size" => (None, Some(size), None),
-                    "favorited_at" => {
+                    FavoritesOrderBy::Name => (sort_str_val, Some(folder_first as i64), None),
+                    FavoritesOrderBy::Type => (sort_str_val, Some(type_order), None),
+                    FavoritesOrderBy::Size => (None, Some(size), None),
+                    FavoritesOrderBy::FavoritedAt => {
                         let ts: Option<chrono::DateTime<chrono::Utc>> =
                             row.try_get("favorited_at").ok();
                         (None, None, ts)
                     }
-                    "modified_at" => {
+                    FavoritesOrderBy::ModifiedAt => {
                         let ts: Option<chrono::DateTime<chrono::Utc>> =
-                            row.try_get("modified_at").ok();
+                            row.try_get("content_modified_at").ok();
                         (None, None, ts)
                     }
-                    "owner" => {
+                    FavoritesOrderBy::Owner => {
                         // For "owner" sort the JOIN added LOWER(u.username) AS username_lower.
                         // The cursor's sort_str must carry the username (not the file name).
                         let username: Option<String> = row.try_get("username_lower").ok();
@@ -666,7 +650,6 @@ LIMIT $6"
                             row.try_get("favorited_at").ok();
                         (username, None, ts)
                     }
-                    _ => (sort_str_val, Some(folder_first as i64), None),
                 };
 
                 FavoriteResourceRow {
@@ -677,7 +660,7 @@ LIMIT $6"
                     mime_type: row.try_get("mime_type").ok(),
                     size,
                     resource_created_at: row.get("resource_created_at"),
-                    modified_at: row.get("modified_at"),
+                    modified_at: row.get("content_modified_at"),
                     drive_id: row.get("drive_id"),
                     blob_hash: row.try_get("blob_hash").ok(),
                     created_by: row.try_get("created_by").ok(),

@@ -39,7 +39,9 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use oxicloud::application::dtos::search_dto::{SearchFileResultDto, SearchResultsDto};
+use oxicloud::application::dtos::search_dto::{
+    SearchFileResultDto, SearchOrderBy, SearchResultsDto,
+};
 use oxicloud::application::services::search_service::{
     build_search_results_cache, search_results_entry_weight,
 };
@@ -142,9 +144,6 @@ fn synth_entry(idx: u64) -> Arc<SearchResultsDto> {
                 1_752_800_000,
             ),
             relevance_score: 50,
-            size_formatted: "812.4 KB".to_string(),
-            icon_class: "fas fa-file-pdf".into(),
-            icon_special_class: "pdf-icon".into(),
             category: "document".into(),
             blob_hash: pseudo_hex(&mut rng, 64),
             snippet: content_hit.then(|| SNIPPET.to_string()),
@@ -164,7 +163,7 @@ fn synth_entry(idx: u64) -> Arc<SearchResultsDto> {
         0,
         Some(12_345),
         3,
-        "relevance".to_string(),
+        SearchOrderBy::Relevance,
     ))
 }
 

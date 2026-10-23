@@ -34,8 +34,6 @@ export interface FileItem {
 	category: string;
 	/** RFC 3339 UTC timestamp (wire form after the DTO ISO-8601 pivot). */
 	created_at: string;
-	icon_class: string;
-	icon_special_class: string;
 	id: string;
 	mime_type: string;
 	/** RFC 3339 UTC timestamp. */
@@ -48,17 +46,21 @@ export interface FileItem {
 	folder_id: string;
 	path: string;
 	size: number;
-	size_formatted: string;
 	/**
-	 * Deprecated — `sort_date` moved to the item-level envelope on
-	 * `/api/photos/resources` (§1 of
-	 * `docs/plan/photos-resources-migration.md`). The field was only
-	 * ever populated by the legacy `/api/photos` route, which §4
-	 * removed. Kept optional so test fixtures that still spell
-	 * `sort_date: 0` compile unchanged; delete it the next time this
-	 * interface is touched for an unrelated reason.
+	 * Deprecated on `FileItem` — `sort_date` moved to the item-level
+	 * envelope on `/api/photos/resources` (§1 of
+	 * `docs/plan/photos-resources-migration.md`), where `PhotoItem`
+	 * declares it as a required RFC 3339 string. The field was only ever
+	 * populated here by the legacy `/api/photos` route, which §4
+	 * removed.
+	 *
+	 * Typed `string | number` solely so the two can coexist: `PhotoItem
+	 * extends FileItem` must narrow to something assignable to this, and
+	 * existing test fixtures and benches seed a bare number. The wire
+	 * only ever sends the string — see {@link photoTimestamp}, which
+	 * accepts both for that reason and prefers neither silently.
 	 */
-	sort_date?: number;
+	sort_date?: string | number;
 	etag: string;
 	content_hash: string;
 	/** See `FolderItem.is_favorite` — same wire contract. */
@@ -123,9 +125,9 @@ export type { FavoriteItem, RecentItem };
 // (6-value union — all legitimate trash kinds are a strict subset so
 // current `.resource_type` switches still cover reality), and
 // `resource: FileItem | FolderItem` widens to `ResourceContentDto`
-// (= FileDto | FolderDto | DriveDto). The display-enriched fields
-// (`icon_class`, `category`, `size_formatted`, …) are present on both
-// FileDto and FolderDto, so UI rows that read them keep working;
+// (= FileDto | FolderDto | DriveDto). The display-enriched field
+// (`category`) is present on both
+// FileDto and FolderDto, so UI rows that read it keep working;
 // DriveDto is a phantom branch — drives never go into trash, so a
 // `kind === 'drive'` match is dead code at runtime but legal at the
 // type level.
@@ -213,35 +215,42 @@ export interface AdminUsersPage {
 // explanation — are already carried by the generated type via utoipa.
 export type { AuthResponseDto as AuthResponse } from './generated/openapi/types.gen';
 
-/**
- * Sort dimension for `GET /api/search`. Wire-matches the backend's
- * `SearchResourcesQuery.order_by` — 5 canonical values, direction is
- * a separate `reverse` boolean (the `_desc` suffix pattern was
- * retired 2026-07-26; `date` was renamed to the more explicit
- * `updated_at` alongside the new `created_at`).
- */
-export type SortBy = 'relevance' | 'name' | 'size' | 'updated_at' | 'created_at';
+// §7 part 3g: the hand-written `SortBy` union lived here and had to be
+// kept in step with the server by hand. DELETED rather than re-exported
+// under the old name — a pass-through alias is still a second name for
+// one concept, and the point is that there is exactly one. Its two call
+// sites now import the generated `SearchOrderBy` directly.
+//
+// Direction remains the orthogonal `reverse` boolean: the `_desc` suffix
+// pattern was retired 2026-07-26, and part 3e deleted the last dead arms
+// that still matched it.
 
 /**
  * Per-item search metadata inline on every hit in the normalized
  * `/api/search` envelope. Mirrors backend `SearchMeta` — see
  * `application/dtos/search_dto.rs`.
  */
-// Shapes authoritative on the generated SDK — re-exported here so
-// consumers importing from `$lib/api/types` keep working. The
-// generated `SearchResourceItem.resource` is `ResourceContentDto`
-// (a `FileDto | FolderDto | DriveDto` untagged union) rather than
-// the pre-SDK `FileItem | FolderItem` hand-written union: a search
-// result CAN now be a Drive. Consumers that discriminated on
-// `resource_type` already handle the broader union correctly; those
-// that pattern-matched on the two-arm shape need updating at the
-// call site (TS surfaces the delta).
+// `SearchMeta` and `SearchResourceItem` were re-exported here purely so
+// consumers importing from `$lib/api/types` kept working across the SDK
+// migration. Both are gone: a pass-through alias is a second name for one
+// concept, and the point of the generated SDK is that there is exactly
+// one. `SearchResourceItem` had a single consumer (the /search route,
+// now importing it directly) and `SearchMeta` had none at all.
 //
-// `SearchResourcesResponse` maps to the generated `SearchResourcesDto`
-// — the openapi-ts-emitted `SearchResourcesResponse` is a status-code
-// wrapper (`{ 200: SearchResourcesDto }[keyof …]`), not the payload
-// shape the FE wants.
-export type { SearchMeta, SearchResourceItem } from './generated/openapi/types.gen';
+// Worth keeping in mind at the call site, since this comment used to
+// carry it: the generated `SearchResourceItem.resource` is
+// `ResourceContentDto` — a `FileDto | FolderDto | DriveDto` untagged
+// union, not the pre-SDK two-arm `FileItem | FolderItem`. A search
+// result CAN be a Drive. Code that discriminates on `resource_type`
+// handles the wider union already; code that pattern-matched on two
+// arms needs updating, and TS surfaces the delta.
+//
+// `SearchResourcesResponse` STAYS an alias rather than a pass-through:
+// it renames a different type. openapi-ts emits its own
+// `SearchResourcesResponse` as a status-code wrapper
+// (`{ 200: SearchResourcesDto }[keyof …]`), not the payload shape, so
+// importing that name directly from the SDK would give callers the
+// wrong thing. The alias resolves a genuine name collision.
 export type { SearchResourcesDto as SearchResourcesResponse } from './generated/openapi/types.gen';
 
 export type DriveKind = 'personal' | 'shared';

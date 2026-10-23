@@ -10,7 +10,7 @@ use quick_xml::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::application::dtos::display_helpers::{format_file_size, intern_display};
+use crate::application::dtos::display_helpers::intern_display;
 use crate::application::dtos::favorites_dto::ItemKind;
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
@@ -169,6 +169,15 @@ async fn handle_filter_files(
         // result (benches/DEAD-PROPS.md).
         let file_deads = files_dead_props_map(&state.webdav_dead_props, &files).await;
         let folder_deads = folders_dead_props_map(&state.webdav_dead_props, &folders).await;
+        // Same batching rule for `nc:creation_time`'s source: one
+        // = ANY($1) query for the whole result set. A failure degrades the
+        // property to "unknown" rather than failing the REPORT, since it is
+        // presentational — see `super::nc_creation_time`.
+        let file_meta = crate::interfaces::nextcloud::nc_creation_times(
+            &state.repositories.file_metadata_repository,
+            &file_uuids,
+        )
+        .await;
 
         // Keep main's batched-resolution structure (one batch query
         // per type, not 2N round-trips). Hrefs use `url_user` so the
@@ -212,6 +221,7 @@ async fn handle_filter_files(
                 &user.username,
                 &favorite_ids,
                 dead,
+                super::nc_creation_time(&file_meta, &file.id),
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }
@@ -335,6 +345,15 @@ async fn handle_search(
         // result (benches/DEAD-PROPS.md).
         let file_deads = files_dead_props_map(&state.webdav_dead_props, &files).await;
         let folder_deads = folders_dead_props_map(&state.webdav_dead_props, &folders).await;
+        // Same batching rule for `nc:creation_time`'s source: one
+        // = ANY($1) query for the whole result set. A failure degrades the
+        // property to "unknown" rather than failing the REPORT, since it is
+        // presentational — see `super::nc_creation_time`.
+        let file_meta = crate::interfaces::nextcloud::nc_creation_times(
+            &state.repositories.file_metadata_repository,
+            &file_uuids,
+        )
+        .await;
 
         // Files.
         // One oc:id buffer reused across both emit loops (benches/ROUND27.md §H1).
@@ -373,6 +392,7 @@ async fn handle_search(
                 &user.username,
                 &favorite_ids,
                 dead,
+                super::nc_creation_time(&file_meta, &file.id),
             )
             .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
         }
@@ -443,16 +463,13 @@ fn file_dto_from_search(fr: &crate::application::dtos::search_dto::SearchFileRes
         path: fr.path.clone(),
         size: fr.size,
         // Interned `Arc<str>` carried through from enrichment — refcount
-        // bumps; the old code re-ran all three display classifiers and
+        // bumps; the old code re-ran every display classifier and
         // re-allocated each value per converted search row.
         mime_type: fr.mime_type.clone(),
         folder_id: fr.folder_id.clone(),
         created_at: fr.created_at,
         modified_at: fr.modified_at,
-        icon_class: fr.icon_class.clone(),
-        icon_special_class: fr.icon_special_class.clone(),
         category: fr.category.clone(),
-        size_formatted: format_file_size(fr.size),
         content_hash: fr.blob_hash.clone(),
         etag,
         // §14 provenance not selected by the search result DTO.
@@ -488,9 +505,12 @@ fn folder_dto_from_search(
         drive_id: sr.drive_id,
         created_at: sr.created_at,
         modified_at: sr.modified_at,
-        is_root: sr.is_root,
-        icon_class: intern_display("fas fa-folder"),
-        icon_special_class: intern_display("folder-icon"),
+        // Search results carry no subtree rollup. This path *does* emit
+        // `D:getlastmodified` (NC REPORT), so the fallback is load-bearing:
+        // a REPORT hit keeps reporting the folder's own mtime, as it did
+        // before `tree_modified_at` existed. Wiring the rollup here means
+        // widening the search projection — tracked in the dates plan.
+        tree_modified_at: sr.modified_at,
         category: intern_display("Folder"),
         // §14 provenance not selected by search results.
         created_by: None,

@@ -569,9 +569,10 @@ async fn handle_propfind(
                 drive_id: Uuid::nil(),
                 created_at: Utc::now(),
                 modified_at: Utc::now(),
-                is_root: true,
-                icon_class: intern_display("fas fa-folder"),
-                icon_special_class: intern_display("folder-icon"),
+                // Synthetic root has no row to roll up from, so it keeps
+                // the same "now" the other two clocks get. DAV reads this
+                // for the root collection's `getlastmodified`.
+                tree_modified_at: Utc::now(),
                 category: intern_display("Folder"),
                 created_by: None,
                 updated_by: None,

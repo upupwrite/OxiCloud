@@ -719,6 +719,20 @@ export type CreateFileByHashRequest = {
      * File name to create (path components are stripped).
      */
     name: string;
+    /**
+     * §9 — the browser's `File.lastModified`, epoch **milliseconds**.
+     *
+     * Optional, and absent means "stamp `NOW()`". Same unit and same
+     * trust bounds as the multipart `source_modified_at` field on
+     * `/api/files/upload`; the server rounds half-up and rejects
+     * implausible values with a 400 rather than clamping.
+     *
+     * This endpoint needs its own slot because it is `uploadOneFile`'s
+     * FIRST short-circuit: re-uploading content the caller already owns
+     * never reaches the multipart path, so without this a duplicate
+     * upload silently lost its source mtime even for a small file.
+     */
+    source_modified_at?: number | null;
 };
 
 /**
@@ -1024,6 +1038,20 @@ export type DeltaCommitRequest = {
      * Create mode: file name (basename).
      */
     name?: string | null;
+    /**
+     * §9 — the browser's `File.lastModified`, epoch **milliseconds**.
+     *
+     * Optional; absent means "stamp `NOW()`". Same unit and trust bounds
+     * as the multipart `source_modified_at` and the by-hash field: the
+     * server rounds half-up and refuses implausible values with a 400.
+     *
+     * This path needs its own slot because the SPA chooses delta purely
+     * by size — everything at or above `DELTA_UPLOAD_MIN_SIZE` (8 MiB)
+     * comes here and never reaches the multipart handler. Without it the
+     * capability was size-dependent: small uploads kept their mtime and
+     * large ones silently lost it.
+     */
+    source_modified_at?: number | null;
 };
 
 /**
@@ -1519,21 +1547,14 @@ export type FaceBoxDto = {
  */
 export type FavoriteItemDto = {
     /**
-     * Human-readable category (e.g. "Image", "Folder")
+     * Content category — a stable machine key, not display text (e.g.
+     * "Image", "Folder"). See `FileDto::category`.
      */
     category: string;
     /**
      * When the item was added to favorites
      */
     created_at: string;
-    /**
-     * FontAwesome icon CSS class (e.g. "fas fa-file-image", "fas fa-folder")
-     */
-    icon_class: string;
-    /**
-     * Extra CSS class for icon styling (e.g. "image-icon", "folder-icon")
-     */
-    icon_special_class: string;
     /**
      * Unique identifier for the favorite entry
      */
@@ -1575,14 +1596,22 @@ export type FavoriteItemDto = {
      */
     parent_id?: string | null;
     /**
-     * Formatted file size (e.g. "3.27 MB"); "--" for folders
-     */
-    size_formatted: string;
-    /**
      * User ID who owns this favorite
      */
     user_id: string;
 };
+
+/**
+ * Sort axis for `GET /api/favorites/resources` (§7).
+ *
+ * Typed rather than `Option<String>` so an unknown axis is refused at
+ * wire-decode time instead of silently falling back to the default. See
+ * [`crate::application::dtos::trash_dto::TrashOrderBy`] for why these are
+ * per-endpoint enums rather than one shared union: the date axis is the
+ * part that differs, and favorites' is `favorited_at`, which is
+ * meaningless on every other endpoint.
+ */
+export type FavoritesOrderBy = 'name' | 'type' | 'favorited_at' | 'modified_at' | 'size' | 'owner';
 
 /**
  * One item in a `GET /api/favorites/resources` page.
@@ -1680,7 +1709,22 @@ export type FederationKindDto = 'magic_link' | 'ocm' | 'oidc';
  */
 export type FileDto = {
     /**
-     * Human-readable file category (e.g. "Image", "Document")
+     * Coarse content category — a **stable machine key**, not display text.
+     *
+     * Values are the English identifiers `category_for` returns ("Image",
+     * "Document", "Spreadsheet", …). Clients must treat them as opaque keys:
+     * the SPA's only legitimate consumer path is
+     * `utils/resourceBuckets.ts::typeLabel`, which maps them to localised
+     * labels, plus the group-by buckets keyed off the same values. Rendering
+     * this field directly is the i18n bug step 1 of
+     * `docs/plan/retire-precomputed-display-fields.md` fixed — it showed
+     * untranslated English in the Type column for every non-English locale.
+     *
+     * This is the one display field that stays server-side, and the reason is
+     * not symmetry with the others: `category_order_for` turns it into
+     * `storage.files.category_order`, the indexed `type` sort key. Deriving
+     * it client-side would let the FE's buckets disagree with the server's
+     * `ORDER BY`. See `docs/architecture/resource-listing.md`.
      */
     category: string;
     /**
@@ -1713,14 +1757,6 @@ export type FileDto = {
      * Parent folder ID
      */
     folder_id?: string | null;
-    /**
-     * FontAwesome icon CSS class (e.g. "fas fa-file-image")
-     */
-    icon_class: string;
-    /**
-     * Extra CSS class for icon styling (e.g. "image-icon", "" when default)
-     */
-    icon_special_class: string;
     /**
      * File ID
      */
@@ -1767,10 +1803,6 @@ export type FileDto = {
      * Size in bytes
      */
     size: number;
-    /**
-     * Human-readable formatted size (e.g. "3.27 MB")
-     */
-    size_formatted: string;
     /**
      * §14 provenance: user that performed the most recent mutation
      * that bumped `updated_at`. Authorship signal — distinct from
@@ -1859,7 +1891,8 @@ export type FolderAncestorsDto = {
  */
 export type FolderDto = {
     /**
-     * Human-readable category (always "Folder")
+     * Content category — a stable machine key, not display text; always
+     * "Folder". See `FileDto::category` for the contract.
      */
     category: string;
     /**
@@ -1888,14 +1921,6 @@ export type FolderDto = {
      */
     etag: string;
     /**
-     * FontAwesome icon CSS class (always "fas fa-folder")
-     */
-    icon_class: string;
-    /**
-     * Extra CSS class for icon styling (always "folder-icon")
-     */
-    icon_special_class: string;
-    /**
      * Folder ID
      */
     id: string;
@@ -1908,16 +1933,16 @@ export type FolderDto = {
      */
     is_favorite: boolean;
     /**
-     * Whether this is a root folder
-     */
-    is_root: boolean;
-    /**
      * Resource-scoped: `true` when the folder has ANY explicit
      * role-grant on it. Same wire contract as `is_favorite`.
      */
     is_shared: boolean;
     /**
      * Last modification timestamp (RFC 3339 UTC).
+     *
+     * The folder row's own `updated_at` — bumped by a rename or a move of
+     * *this* folder, not by anything happening inside it. For "did anything
+     * in this subtree change", use `tree_modified_at` below.
      */
     modified_at: string;
     /**
@@ -1932,6 +1957,19 @@ export type FolderDto = {
      * Path to the folder (relative)
      */
     path: string;
+    /**
+     * Descendant-rollup timestamp (RFC 3339 UTC): the most recent change
+     * anywhere in this folder's subtree.
+     *
+     * This is what a collection's content-modification time actually means —
+     * a folder's "content" is its children — so `D:getlastmodified` is
+     * sourced from here rather than from `modified_at`, which would report a
+     * rename of the folder itself as a content change. It is also the input
+     * to `etag` below, so the two agree by construction.
+     *
+     * See `docs/architecture/dates.md` § Collections.
+     */
+    tree_modified_at: string;
     /**
      * §14 provenance: user that performed the most recent mutation
      * that bumped `updated_at`. Authorship signal — distinct from
@@ -1966,6 +2004,21 @@ export type FolderListingDto = {
      */
     shared_ids: Array<string>;
 };
+
+/**
+ * Sort axis for `GET /api/folders/{id}/resources` (§7).
+ *
+ * Typed rather than `Option<String>` so an unknown axis is refused at
+ * wire-decode time instead of silently falling back to the default. See
+ * [`crate::application::dtos::trash_dto::TrashOrderBy`] for why these are
+ * per-endpoint enums rather than one shared union.
+ *
+ * This is the folder-contents listing — the hot path behind `/files` —
+ * and the endpoint where §2 found a keyset predicate reading one column
+ * while the ORDER BY named another. Typing the axis is what stops the
+ * query builder and the cursor builder disagreeing about it.
+ */
+export type FolderOrderBy = 'name' | 'type' | 'modified_at' | 'created_at' | 'size';
 
 /**
  * One item in a `/resources` page — a file or folder with a `resource_type` tag.
@@ -2322,6 +2375,20 @@ export type HolderHeader = {
      */
     kind: string;
 };
+
+/**
+ * Sort axis for `GET /api/grants/incoming/resources` — the `/shared-with-me`
+ * listing (§7).
+ *
+ * **Separate from [`OutgoingGrantOrderBy`] on purpose.** The two grant
+ * listings accept disjoint sets apart from `Name`/`Type`: "who granted this
+ * to me" only exists on the incoming side, "who did I grant it to" only on
+ * the outgoing side. They shared one `Option<String>` field until §7 part
+ * 3f, with each handler validating its own set by hand — which is how the
+ * plan's own spec came to list only two of the four values this endpoint
+ * actually accepts.
+ */
+export type IncomingGrantOrderBy = 'granted_at' | 'granted_by' | 'name' | 'type';
 
 /**
  * What a favorite points at. The server emits exactly these two values
@@ -2864,6 +2931,13 @@ export type OpsBannerInput = {
 export type OpsBannerSeverity = 'warning' | 'notification';
 
 /**
+ * Sort axis for `GET /api/grants/outgoing/resources` — the `/shared`
+ * ("My Shares") listing (§7). See [`IncomingGrantOrderBy`] for why the two
+ * are separate types.
+ */
+export type OutgoingGrantOrderBy = 'first_shared_at' | 'name' | 'type' | 'subject' | 'role';
+
+/**
  * One (subject, permissions) entry within an outgoing resource item.
  */
 export type OutgoingResourceGrantDto = {
@@ -3008,23 +3082,116 @@ export type PhotoKind = 'all' | 'photo' | 'video';
  * The three axes serve distinct questions:
  *
  * - `CapturedAt` (default) — "when was this photo TAKEN". Orders by
- * `COALESCE(captured_at, created_at)` via the materialised
+ * `COALESCE(captured_at, content_modified_at)` via the materialised
  * `storage.files.media_sort_date` column, so uploads without EXIF
- * fall back to upload time rather than sinking to NULL.
+ * fall back to when their content last changed rather than sinking
+ * to NULL.
  * - `CreatedAt` — "when did this file ARRIVE in OxiCloud". Pure
  * `storage.files.created_at`; EXIF capture date ignored. Useful
  * for the operator-style "recently uploaded" view.
- * - `UpdatedAt` — "when was this file last TOUCHED". Pure
- * `storage.files.updated_at`; moves and renames resurface rows.
- * Useful when the user wants to find a file they recently acted
- * on, independent of when it was taken or first uploaded.
+ * - `ModifiedAt` (`modified_at` on the wire) — "when did this file's
+ * CONTENT last change". Reads `storage.files.content_modified_at`,
+ * so a rename, move or trash transition does *not* resurface a row
+ * — only a real content mutation does.
  *
  * All three axes paginate on the same `(sort_value, id)` keyset,
  * just over different columns. The cursor carries the axis so a
  * mid-scroll flip is rejected by the handler with 400 rather than
  * silently drifting pagination.
  */
-export type PhotoOrderBy = 'captured_at' | 'created_at' | 'updated_at';
+export type PhotoOrderBy = 'captured_at' | 'created_at' | 'modified_at';
+
+/**
+ * One item in a `GET /api/photos/resources` page.
+ *
+ * `resource_type` is always `ResourceTypeDto::File` — the listing is
+ * media-files-only — but the field stays for shape parity with other
+ * `/resources` endpoints. Clients can pattern-match on it the same
+ * way they do on favorites or trash items.
+ */
+export type PhotoResourceItemDto = {
+    /**
+     * Raw EXIF `DateTimeOriginal` (RFC 3339 UTC). `None` when the
+     * file carries no EXIF date. Lets the client distinguish "taken
+     * on this date" from the fallback that `sort_date` collapses into
+     * one value — but it is NOT a sort axis, so do not group by it.
+     */
+    captured_at?: string | null;
+    /**
+     * `true` when at least one other non-trashed media row in the
+     * same drive references the same blob hash — i.e. the §9
+     * within-drive `DISTINCT ON (blob_hash)` hid one or more
+     * siblings behind this tile. §9b Layer 1 of
+     * `docs/plan/photos-resources-migration.md` surfaces this as the
+     * delete-UX hint: a `true` tile warns the user that "trashing
+     * this removes only one copy of the content — N other copies
+     * still live elsewhere in this drive", so the gallery can offer
+     * the siblings list from `GET /api/dedup/check/{hash}` (Layer 2)
+     * before committing. `false` is the common case and lets the FE
+     * skip the sibling fetch entirely — zero round trips when
+     * there's nothing to warn about.
+     */
+    has_blob_siblings: boolean;
+    /**
+     * `true` when the file has both GPS lat AND lng. Presence signal
+     * only — the raw coordinates stay off the main listing. Enables
+     * a "📍 has location" badge and a "photos with location"
+     * client-side filter without disclosing per-photo coordinates on
+     * every gallery tile. Important on public share links where a
+     * visitor seeing GPS for every photo would often be unintended
+     * by the sharer. For the Places map, continue to use
+     * `/api/photos/geo` which clusters coords server-side; for a
+     * specific photo's exact lat/lng, call `/api/files/{id}/metadata`
+     * — the explicit per-photo call is the right disclosure
+     * boundary.
+     */
+    has_gps: boolean;
+    /**
+     * Image/video height in pixels, from `storage.file_metadata`.
+     */
+    height?: number | null;
+    /**
+     * Raw EXIF orientation (TIFF 1–8 enum). `None` when absent. The
+     * client applies this to the full-resolution image tile BEFORE
+     * pixels arrive, so there is no "appears sideways, flips" flash
+     * on `<img>` load in browsers that don't auto-rotate. Note:
+     * thumbnails already arrive display-correct — the server-side
+     * thumbnail generator bakes rotation into the output pixels.
+     * This field is strictly for the full-res lightbox / download
+     * viewer.
+     */
+    orientation?: number | null;
+    /**
+     * Full file details — serialised as the inner object via
+     * `ResourceContentDto`'s `#[serde(untagged)]`, so consumers read
+     * `resource.id`, `resource.name`, … directly.
+     */
+    resource: ResourceContentDto;
+    resource_type: ResourceTypeDto;
+    /**
+     * Value of the **active sort axis** (RFC 3339 UTC) — whichever
+     * column the server actually ordered this page by, not one fixed
+     * column. `order_by=captured_at` (the default) yields
+     * `media_sort_date`, i.e. `COALESCE(captured_at,
+     * content_modified_at)`; `order_by=created_at` yields
+     * `created_at`; `order_by=modified_at` yields
+     * `content_modified_at`. The cursor keys off this value.
+     *
+     * **Clients must bucket and group on this field**, precisely
+     * because it tracks the ordering. The timeline arrives
+     * monotonically newest-first, and a UI that groups on any other
+     * date can see a month reopen after it closed. Doing exactly that
+     * — grouping on `created_at` — is what broke `/photos` with
+     * `each_key_duplicate` once §3 made the two axes diverge.
+     */
+    sort_date: string;
+    /**
+     * Image/video width in pixels, from `storage.file_metadata`.
+     * `None` when the row has no metadata (very old uploads, or a
+     * format the metadata extractor doesn't understand).
+     */
+    width?: number | null;
+};
 
 export type PlaylistDto = {
     cover_file_id?: string | null;
@@ -3185,17 +3352,10 @@ export type RecentItemDto = {
      */
     accessed_at: string;
     /**
-     * Human-readable category (e.g. "Image", "Folder")
+     * Content category — a stable machine key, not display text (e.g.
+     * "Image", "Folder"). See `FileDto::category`.
      */
     category: string;
-    /**
-     * FontAwesome icon CSS class (e.g. "fas fa-file-image", "fas fa-folder")
-     */
-    icon_class: string;
-    /**
-     * Extra CSS class for icon styling (e.g. "image-icon", "folder-icon")
-     */
-    icon_special_class: string;
     /**
      * Unique identifier for the recent item
      */
@@ -3232,14 +3392,21 @@ export type RecentItemDto = {
      */
     parent_id?: string | null;
     /**
-     * Formatted file size (e.g. "3.27 MB"); "--" for folders
-     */
-    size_formatted: string;
-    /**
      * Owner user ID
      */
     user_id: string;
 };
+
+/**
+ * Sort axis for `GET /api/recent/resources` (§7).
+ *
+ * Typed rather than `Option<String>` so an unknown axis is refused at
+ * wire-decode time instead of silently falling back to the default. See
+ * [`crate::application::dtos::trash_dto::TrashOrderBy`] for why these are
+ * per-endpoint enums: `accessed_at` is recent's own date axis and means
+ * nothing on any other listing.
+ */
+export type RecentOrderBy = 'accessed_at' | 'name' | 'type' | 'modified_at' | 'size' | 'owner';
 
 /**
  * One item in a `GET /api/recent/resources` page.
@@ -3392,10 +3559,6 @@ export type SearchCriteriaDto = {
      */
     created_before?: number | null;
     /**
-     * Optional list of file extensions to include (e.g., "pdf", "jpg")
-     */
-    file_types?: Array<string> | null;
-    /**
      * Optional folder ID to limit search scope
      */
     folder_id?: string | null;
@@ -3428,6 +3591,13 @@ export type SearchCriteriaDto = {
      */
     offset?: number;
     /**
+     * Sort dimension — see [`SearchOrderBy`]. Direction is `reverse`
+     * below; the `_desc` suffix pattern was retired 2026-07-26 in favour
+     * of a single boolean, so every consumer treats "which column" and
+     * "which direction" as orthogonal concerns.
+     */
+    order_by?: SearchOrderBy;
+    /**
      * Whether to search recursively within subfolders (default: true)
      */
     recursive?: boolean;
@@ -3437,13 +3607,20 @@ export type SearchCriteriaDto = {
      */
     reverse?: boolean;
     /**
-     * Sort dimension. Canonical set: `"relevance"` | `"name"` | `"size"`
-     * | `"updated_at"` | `"created_at"`. Direction is `reverse` below —
-     * the `_desc` suffix pattern was retired 2026-07-26 in favour of
-     * a single boolean, so every consumer treats "which column" and
-     * "which direction" as orthogonal concerns.
+     * Resource-category narrowing — see [`SearchTypeFilter`].
+     *
+     * Was `file_types: Option<Vec<String>>`, a list of filename extensions
+     * the SPA assembled. Carrying the category instead keeps the
+     * extension→category table on the server (one copy, next to
+     * `category_order_for`) and lets the SQL filter on the indexed
+     * `storage.files.category_order` rather than re-deriving an extension
+     * from the name at query time.
+     *
+     * Not `Option`: `All` is the honest default, and a `Copy` enum also
+     * makes this struct's `Hash` — which keys the search result cache —
+     * cheaper and stabler than a `Vec<String>` whose order could vary.
      */
-    sort_by?: string;
+    type_filter?: SearchTypeFilter;
 };
 
 /**
@@ -3468,7 +3645,11 @@ export type SearchFileResultDto = {
      */
     blob_hash?: string;
     /**
-     * Content category: "document", "image", "video", "audio", "archive", "code", "other"
+     * Coarse content category — a stable machine key, not display text.
+     * Carried through from `FileDto::category`; see that field for the full
+     * contract. (This comment used to claim lowercase values — "document",
+     * "image", … — which it never carried: `enrich_file` copies the
+     * capitalised `category_for` output verbatim.)
      */
     category: string;
     /**
@@ -3491,14 +3672,6 @@ export type SearchFileResultDto = {
      * Parent folder ID
      */
     folder_id?: string | null;
-    /**
-     * CSS icon class for the file type (e.g., "fas fa-file-pdf")
-     */
-    icon_class: string;
-    /**
-     * Extra CSS class for icon styling (e.g., "pdf-icon", "code-icon js-icon")
-     */
-    icon_special_class: string;
     /**
      * File ID
      */
@@ -3545,10 +3718,6 @@ export type SearchFileResultDto = {
      * Size in bytes
      */
     size: number;
-    /**
-     * Human-readable file size (e.g., "2.5 MB")
-     */
-    size_formatted: string;
     /**
      * Plain-text fragment around the first content match, present only for
      * hits discovered through the full-text content index.
@@ -3597,10 +3766,6 @@ export type SearchFolderResultDto = {
      * this folder. EXISTS on `auth.user_favorites`.
      */
     is_favorite?: boolean;
-    /**
-     * Whether it is a root folder
-     */
-    is_root: boolean;
     /**
      * Resource-scoped: `true` when the folder has any explicit
      * role-grant. EXISTS on `storage.role_grants`.
@@ -3657,6 +3822,27 @@ export type SearchMeta = {
      */
     via?: string | null;
 };
+
+/**
+ * Sort axis for `GET /api/search` (§7).
+ *
+ * Typed rather than `String` so an unknown axis is refused at
+ * wire-decode time instead of silently falling back to the default. See
+ * [`crate::application::dtos::trash_dto::TrashOrderBy`] for why these are
+ * per-endpoint enums rather than one shared union — `Relevance` only
+ * exists here, and is meaningless on every other listing.
+ *
+ * Direction is the orthogonal `reverse` boolean, NOT a `_desc` suffix on
+ * the axis. That pattern was retired 2026-07-26; typing the axis is what
+ * finally made the leftover `name_desc` / `date` / `date_desc` arms in
+ * the recursive search path impossible to leave lying around (§7 part
+ * 3e — they were dead spellings whose presence hid a real bug, see
+ * `sort_enriched_folders`).
+ *
+ * `Hash` is required: this rides on `SearchCriteriaDto`, which is hashed
+ * to key the search result cache.
+ */
+export type SearchOrderBy = 'relevance' | 'name' | 'size' | 'modified_at' | 'created_at';
 
 /**
  * One search result — same `resource_type + resource` shape as the
@@ -3731,13 +3917,13 @@ export type SearchResultsDto = {
      */
     offset: number;
     /**
+     * Sort order used
+     */
+    order_by: SearchOrderBy;
+    /**
      * Query execution time in milliseconds (server-side)
      */
     query_time_ms: number;
-    /**
-     * Sort order used
-     */
-    sort_by: string;
     /**
      * Total count of matching items (for pagination)
      */
@@ -3749,14 +3935,6 @@ export type SearchResultsDto = {
  */
 export type SearchSuggestionItem = {
     /**
-     * CSS icon class
-     */
-    icon_class: string;
-    /**
-     * Extra CSS class for icon styling
-     */
-    icon_special_class: string;
-    /**
      * Item ID for navigation
      */
     id: string;
@@ -3764,6 +3942,15 @@ export type SearchSuggestionItem = {
      * Type: "file" or "folder"
      */
     item_type: string;
+    /**
+     * MIME type, so the client can pick its own glyph.
+     *
+     * Replaced `icon_class` (a CSS class string) in step 4 of
+     * `docs/plan/retire-precomputed-display-fields.md`. Folders carry
+     * `"directory"`, matching the convention elsewhere in the storage layer —
+     * clients branch on `item_type` for those and never consult this.
+     */
+    mime_type: string;
     /**
      * The suggested name
      */
@@ -3791,6 +3978,29 @@ export type SearchSuggestionsDto = {
      */
     suggestions: Array<SearchSuggestionItem>;
 };
+
+/**
+ * Resource-category filter for `GET /api/search` (`?type=`).
+ *
+ * Replaces a comma-separated **extension** list (`type=pdf,docx`) matched
+ * against the filename. That shape had three defects, all fixed by moving the
+ * classification server-side:
+ *
+ * * the category→extension table lived in the SPA (12 image and 7 audio
+ * extensions hardcoded), so a missed extension silently dropped a file from
+ * its own category;
+ * * extensionless files could never match — the predicate was
+ * `SUBSTRING(name FROM '\.([^.]+)$')`, NULL without a dot, even when
+ * `mime_type` was known;
+ * * folders were never filtered at all, which is the defect a user saw.
+ *
+ * `All` and `Folders` deliberately map to no `storage.files` value: a folder
+ * has no row in that table, so those two cases select which UNION branches
+ * run rather than contributing a predicate. Every other variant resolves
+ * through [`category_orders_for_filter`], which is exhaustive over this enum
+ * so a new variant is a compile error there.
+ */
+export type SearchTypeFilter = 'all' | 'folder' | 'image' | 'video' | 'audio' | 'document' | 'archive' | 'code' | 'other';
 
 /**
  * Self view — everything the caller may see about themselves.
@@ -4491,19 +4701,33 @@ export type TranslationResponseDto = {
 };
 
 /**
+ * Sort axis for `GET /api/trash/resources` (§7).
+ *
+ * Typed rather than `Option<String>` so an unknown axis is refused at
+ * wire-decode time instead of silently falling back to the default —
+ * which is what a bare string did, turning a client typo into "sorted by
+ * something else" with a 200. serde's derived error names the accepted
+ * variants, so the 400 tells the caller what to send; no custom extractor
+ * is involved. `PhotoOrderBy` set this precedent in §6.
+ *
+ * **Per-endpoint by design, not one shared union.** `Name`/`Type`/`Size`
+ * recur across endpoints but the date axes do not — trash has
+ * `expires_at`/`trashed_at`, favorites has `favorited_at`, recent has
+ * `accessed_at`. A shared enum would accept nonsense on every endpoint
+ * but its own.
+ */
+export type TrashOrderBy = 'expires_at' | 'trashed_at' | 'name' | 'type' | 'size';
+
+/**
  * One item in a `GET /api/trash/resources` page.
  *
- * `deletion_date` is the real timestamp at which the item will be permanently
+ * `expires_at` is the real timestamp at which the item will be permanently
  * deleted (= `trashed_at + retention_days`). The client derives "days until
  * deletion" itself from this + the current clock — the wire format does not
  * duplicate that derivation. `resource.path` carries the original location
  * (soft-delete preserves the row's `path` column).
  */
 export type TrashResourceItemDto = {
-    /**
-     * When the item will be permanently deleted by the retention sweeper.
-     */
-    deletion_date: string;
     /**
      * The drive the trashed item belongs to. Enables client-side
      * group-by-drive in the `/trash` UI (D2b spec — see
@@ -4512,6 +4736,10 @@ export type TrashResourceItemDto = {
      * holds in `drives.svelte` — no extra round-trip needed.
      */
     drive_id: string;
+    /**
+     * When the item will be permanently deleted by the retention sweeper.
+     */
+    expires_at: string;
     /**
      * Full resource details — shape determined by `resource_type`.
      */
@@ -4528,18 +4756,11 @@ export type TrashResourceItemDto = {
  */
 export type TrashedItemDto = {
     /**
-     * Human-readable category (e.g., "Image", "Folder", "Document")
+     * Content category — a stable machine key, not display text (e.g.
+     * "Image", "Folder", "Document"). See `FileDto::category`.
      */
     category: string;
     days_until_deletion: number;
-    /**
-     * FontAwesome icon class for the file type
-     */
-    icon_class: string;
-    /**
-     * Special CSS class for icon styling (e.g., "image-icon", "pdf-icon")
-     */
-    icon_special_class: string;
     id: string;
     item_type: string;
     name: string;
@@ -5076,6 +5297,10 @@ export type ListContactsData = {
          * Pagination offset (omit for none; system book defaults to 0)
          */
         offset?: number;
+        /**
+         * System address book only — include the calling user in the results. Default false (the share-modal "can't share with yourself" rule); the admin drive-owner surface sets it true. Ignored for non-system books
+         */
+        include_self?: boolean;
     };
     url: '/api/address-books/{book_id}/contacts';
 };
@@ -9397,10 +9622,11 @@ export type ListFavoritesResourcesData = {
          */
         cursor?: string | null;
         /**
-         * Sort / group-by dimension. Supported: `"name"` (default), `"type"`,
-         * `"favorited_at"`, `"modified_at"`, `"size"`, `"owner"`.
+         * Sort / group-by dimension — see [`FavoritesOrderBy`]. Omit for
+         * `name`. An unknown value is a 400 naming the accepted set, not a
+         * silent fall back to the default.
          */
-        order_by?: string | null;
+        order_by?: null | FavoritesOrderBy;
         /**
          * Comma-separated resource types to include, e.g. `"file,folder"`.
          * Omit to include both.
@@ -10252,10 +10478,11 @@ export type ListFolderResourcesData = {
          */
         cursor?: string | null;
         /**
-         * Sort / group-by dimension. Supported: `"name"` (default), `"type"`,
-         * `"modified_at"`, `"created_at"`, `"size"`.
+         * Sort / group-by dimension — see [`FolderOrderBy`]. Omit for
+         * `name`. An unknown value is a 400 naming the accepted set, not a
+         * silent fall back to the default.
          */
-        order_by?: string | null;
+        order_by?: null | FolderOrderBy;
         /**
          * Comma-separated resource types to include, e.g. `"file,folder"`.
          * Omit to include both.
@@ -10374,10 +10601,10 @@ export type ListSharedWithMeData = {
          */
         cursor?: string | null;
         /**
-         * Sort dimension. Supported values: `"granted_at"` (default),
-         * `"granted_by"` (for swimlane grouping).
+         * Sort dimension — see [`IncomingGrantOrderBy`]. Omit for
+         * `granted_at`. An unknown value is a 400 naming the accepted set.
          */
-        sort_by?: string | null;
+        order_by?: null | IncomingGrantOrderBy;
         /**
          * Comma-separated resource types to include, e.g. `file,folder`.
          * Omit to return all known types.
@@ -10428,14 +10655,14 @@ export type ListMySharesData = {
         limit?: number;
         /**
          * Opaque cursor from a previous response. Omit to start from the
-         * most-recently-granted item.
+         * most-recently-shared item.
          */
         cursor?: string | null;
         /**
-         * Sort dimension. Supported values: `"granted_at"` (default),
-         * `"granted_by"` (for swimlane grouping).
+         * Sort dimension — see [`OutgoingGrantOrderBy`]. Omit for
+         * `first_shared_at`. An unknown value is a 400 naming the accepted set.
          */
-        sort_by?: string | null;
+        order_by?: null | OutgoingGrantOrderBy;
         /**
          * Comma-separated resource types to include, e.g. `file,folder`.
          * Omit to return all known types.
@@ -10443,8 +10670,6 @@ export type ListMySharesData = {
         resource_types?: string | null;
         /**
          * Reverse the sort order. Default `false` (normal order).
-         * Must be the same on all pages of the same result set — the cursor
-         * carries this flag so the server can validate consistency.
          */
         reverse?: boolean;
     };
@@ -11463,7 +11688,20 @@ export type ListPhotosResourcesResponse = ListPhotosResourcesResponses[keyof Lis
 export type ListPlaylistsData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * Include playlists shared with the caller, not just owned ones
+         */
+        include_shared?: boolean;
+        /**
+         * Accepted for backwards compatibility but NOT applied — the listing is derived from the caller's grants and always returns all of them. See PlaylistQueryDto
+         */
+        limit?: number;
+        /**
+         * Accepted for backwards compatibility but NOT applied — see `limit`
+         */
+        offset?: number;
+    };
     url: '/api/playlists';
 };
 
@@ -11901,10 +12139,11 @@ export type ListRecentResourcesData = {
          */
         cursor?: string | null;
         /**
-         * Sort / group-by dimension. Supported: `"accessed_at"` (default), `"name"`,
-         * `"type"`, `"modified_at"`, `"size"`, `"owner"`.
+         * Sort / group-by dimension — see [`RecentOrderBy`]. Omit for
+         * `accessed_at`. An unknown value is a 400 naming the accepted set,
+         * not a silent fall back to the default.
          */
-        order_by?: string | null;
+        order_by?: null | RecentOrderBy;
         /**
          * Comma-separated resource types to include, e.g. `"file,folder"`.
          * Omit to include both.
@@ -12083,9 +12322,9 @@ export type SearchResourcesData = {
          */
         cursor?: string;
         /**
-         * Sort dimension: relevance (default) | name | size | updated_at | created_at
+         * Sort axis; direction is the separate `reverse` flag
          */
-        order_by?: string;
+        order_by?: SearchOrderBy;
         /**
          * Comma-separated: file, folder (both by default)
          */
@@ -12095,9 +12334,9 @@ export type SearchResourcesData = {
          */
         reverse?: boolean;
         /**
-         * Filter by file extensions (comma-separated)
+         * Narrow to one resource category; `folders` returns folders only
          */
-        type?: string;
+        type?: SearchTypeFilter;
         /**
          * Restrict search to this folder
          */
@@ -12216,7 +12455,24 @@ export type SetupAdminResponse = SetupAdminResponses[keyof SetupAdminResponses];
 export type GetUserSharesData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * 1-based page number (default 1). Ignored when item_id + item_type are both given
+         */
+        page?: number;
+        /**
+         * Items per page (default 20). Ignored when item_id + item_type are both given
+         */
+        per_page?: number;
+        /**
+         * Return only shares for this item. Must be sent together with item_type
+         */
+        item_id?: string;
+        /**
+         * Item kind for item_id — `file` or `folder`. An unknown value returns 400
+         */
+        item_type?: string;
+    };
     url: '/api/shares';
 };
 
@@ -12468,11 +12724,11 @@ export type GetTrashResourcesData = {
          */
         cursor?: string | null;
         /**
-         * Sort / group-by dimension. Supported: `"deletion_date"` (default — soonest
-         * expiry first), `"trashed_at"` (most recently trashed first), `"name"`,
-         * `"type"`, `"size"`.
+         * Sort / group-by dimension — see [`TrashOrderBy`]. Omit for
+         * `expires_at` (soonest expiry first). An unknown value is a 400
+         * naming the accepted set, not a silent fall back to the default.
          */
-        order_by?: string | null;
+        order_by?: null | TrashOrderBy;
         /**
          * Comma-separated resource types to include, e.g. `"file,folder"`.
          * Omit to include both.
